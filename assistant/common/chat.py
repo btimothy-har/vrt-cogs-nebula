@@ -654,6 +654,15 @@ class ChatHandler(MixinMeta):
             content += _("\nMissing 'attach files' permissions!")
         delims = ("```", "\n")
 
+        def assistant_embed(content:str):
+            embed = discord.Embed(description=content,color=discord.Colour.default())
+            embed.set_author(
+                name=self.bot.user.display_name,
+                icon_url=self.bot.user.display_avatar.url,
+            )
+            embed.set_footer(text=f"Powered by OpenAI {conf.model.upper()}.")
+            return embed
+
         async def send(
             content: Optional[str] = None,
             embed: Optional[discord.Embed] = None,
@@ -676,12 +685,12 @@ class ChatHandler(MixinMeta):
                     pass
             return await message.channel.send(content=content, embed=embed, embeds=embeds, files=files)
 
-        if len(content) <= 2000:
+        if not embed_perms:
             await send(content, files=files, mention=conf.mention)
         elif len(content) <= 4000 and embed_perms:
-            await send(embed=discord.Embed(description=content), files=files, mention=conf.mention)
+            await send(embed=assistant_embed(content), files=files, mention=conf.mention)
         elif embed_perms:
-            embeds = [discord.Embed(description=p) for p in pagify(content, page_length=3950, delims=delims)]
+            embeds = [assistant_embed(p) for p in pagify(content, page_length=3950, delims=delims)]
             for index, embed in enumerate(embeds):
                 if index == 0:
                     await send(embed=embed, files=files, mention=conf.mention)

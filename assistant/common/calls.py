@@ -55,7 +55,7 @@ async def request_chat_completion_raw(
     kwargs = {
         "model": model,
         "messages": messages,
-        "temperature": temperature,
+        "temperature": temperature, 
         "frequency_penalty": frequency_penalty,
         "presence_penalty": presence_penalty,
     }
