@@ -5,9 +5,7 @@ from time import perf_counter
 from typing import Callable, Dict, List, Optional, Union
 
 import discord
-import tiktoken
 from discord.ext import tasks
-from perftracker import perf
 from pydantic import ValidationError
 from redbot.core import Config, commands
 from redbot.core.bot import Red
@@ -16,7 +14,13 @@ from .abc import CompositeMetaClass
 from .commands import AssistantCommands
 from .common.api import API
 from .common.chat import ChatHandler
-from .common.constants import CREATE_MEMORY, EDIT_MEMORY, LIST_MEMORIES, SEARCH_MEMORIES
+from .common.constants import (
+    CREATE_MEMORY,
+    EDIT_MEMORY,
+    LIST_MEMORIES,
+    REQUEST_TRAINING,
+    SEARCH_MEMORIES,
+)
 from .common.functions import AssistantFunctions
 from .common.models import DB, Embedding, EmbeddingEntryExists, NoAPIKey
 from .common.utils import json_schema_invalid
@@ -46,15 +50,10 @@ class Assistant(
     - **[p]chat**: talk with the assistant
     - **[p]convostats**: view a user's token usage/conversation message count for the channel
     - **[p]clearconvo**: reset your conversation with the assistant in the channel
-
-    **Support for self-hosted endpoints!**
-    Assistant supports usage of **[Self-Hosted Models](https://github.com/vertyco/gpt-api)** via endpoint overrides.
-    To set a custom endpoint for example: `[p]assist endpoint http://localhost:8000/v1`
-    This will now make calls to your self-hosted api.
     """
 
-    __author__ = "Vertyco#0117"
-    __version__ = "5.7.0"
+    __author__ = "vertyco"
+    __version__ = "6.2.2"
 
     def format_help_for_context(self, ctx):
         helpcmd = super().format_help_for_context(ctx)
@@ -68,13 +67,11 @@ class Assistant(
 
     def __init__(self, bot: Red, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.bot = bot
+        self.bot: Red = bot
         self.config = Config.get_conf(self, 117117117, force_registration=True)
         self.config.register_global(db={})
         self.db: DB = DB()
         self.mp_pool = Pool()
-
-        self.tokenizer: tiktoken.core.Encoding = tiktoken.get_encoding("cl100k_base")
 
         # {cog_name: {function_name: {function_json_schema}}}
         self.registry: Dict[str, Dict[str, dict]] = {}
@@ -110,6 +107,7 @@ class Assistant(
         await self.register_function(self.qualified_name, SEARCH_MEMORIES)
         await self.register_function(self.qualified_name, EDIT_MEMORY)
         await self.register_function(self.qualified_name, LIST_MEMORIES)
+        await self.register_function(self.qualified_name, REQUEST_TRAINING)
 
         logging.getLogger("openai").setLevel(logging.WARNING)
         logging.getLogger("aiocache").setLevel(logging.WARNING)
@@ -121,7 +119,6 @@ class Assistant(
         await asyncio.sleep(30)
         self.save_loop.start()
 
-    @perf()
     async def save_conf(self):
         if self.saving:
             return
@@ -247,7 +244,7 @@ class Assistant(
         embedding = await self.request_embedding(text, conf)
         if not embedding:
             return None
-        conf.embeddings[name] = Embedding(text=text, embedding=embedding, ai_created=ai_created)
+        conf.embeddings[name] = Embedding(text=text, embedding=embedding, ai_created=ai_created, model=conf.embed_model)
         asyncio.create_task(self.save_conf())
         return embedding
 
@@ -261,7 +258,7 @@ class Assistant(
         function_map: Optional[Dict[str, Callable]] = None,
         extend_function_calls: bool = True,
         message_obj: Optional[discord.Message] = None,
-    ) -> str:
+    ) -> Union[str, None]:
         """
         Method for other cogs to call the chat API
 

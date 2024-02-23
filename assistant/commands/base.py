@@ -2,15 +2,20 @@ import asyncio
 import json
 import logging
 import traceback
-from io import BytesIO
+from io import StringIO
 
 import discord
 from redbot.core import commands
 from redbot.core.i18n import Translator, cog_i18n
-from redbot.core.utils.chat_formatting import box, escape, pagify, text_to_file
+from redbot.core.utils.chat_formatting import (
+    box,
+    escape,
+    humanize_list,
+    pagify,
+    text_to_file,
+)
 
 from ..abc import MixinMeta
-from ..common.calls import request_model
 from ..common.constants import READ_EXTENSIONS
 from ..common.models import Conversation
 from ..common.utils import can_use, get_attachments
@@ -61,7 +66,7 @@ If a file has no extension it will still try to read it only if it can be decode
         """
             )
             .replace("[p]", ctx.clean_prefix)
-            .format(", ".join(READ_EXTENSIONS))
+            .format(humanize_list(READ_EXTENSIONS))
         )
         embed = discord.Embed(description=txt.strip(), color=ctx.me.color)
         await ctx.send(embed=embed)
@@ -91,6 +96,7 @@ If a file has no extension it will still try to read it only if it can be decode
         **Optional Arguments**
         `--outputfile <filename>` - uploads a file with the reply instead (no spaces)
         `--extract` - extracts code blocks from the reply
+        `--last` - resends the last message of the conversation
 
         **Example**
         `[p]chat write a python script that prints "Hello World!"`
@@ -143,25 +149,17 @@ If a file has no extension it will still try to read it only if it can be decode
             # Return the new RGB color
             return (green, blue)
 
-        convo_tokens = await self.count_payload_tokens(conversation.messages, conf, conf.get_user_model(user))
+        convo_tokens = await self.count_payload_tokens(conversation.messages, conf.get_user_model(user))
         g, b = generate_color(messages, conf.get_user_max_retention(ctx.author))
         gg, bb = generate_color(convo_tokens, max_tokens)
         # Whatever limit is more severe get that color
         color = discord.Color.from_rgb(255, min(g, gg), min(b, bb))
         model = conf.get_user_model(ctx.author)
-        if not conf.api_key and (conf.endpoint_override or self.db.endpoint_override):
-            endpoint = conf.endpoint_override or self.db.endpoint_override
-            try:
-                res = await request_model(f"{endpoint}/model")
-                model = res["model"]
-            except Exception as e:  # Could be any issue, don't worry about it here
-                log.warning(_("Could not fetch external model"), exc_info=e)
-                pass
 
         desc = (
             ctx.channel.mention
             + "\n"
-            + _("`Messages: `{}/{}\n`Tokens:   `{}/{}\n`Expired:  `{}\n`Model:    `{}").format(
+            + _("`Messages:   `{}/{}\n" "`Tokens:     `{}/{}\n" "`Expired:    `{}\n" "`Model:      `{}").format(
                 messages,
                 conf.get_user_max_retention(ctx.author),
                 convo_tokens,
@@ -170,6 +168,7 @@ If a file has no extension it will still try to read it only if it can be decode
                 model,
             )
         )
+        desc += _("\n`Tool Calls: `{}").format(conversation.function_count())
         if conf.collab_convos:
             desc += "\n" + _("*Collabroative conversations are enabled*")
         embed = discord.Embed(
@@ -284,6 +283,8 @@ If a file has no extension it will still try to read it only if it can be decode
         Set a system prompt for this conversation!
 
         This allows customization of assistant behavior on a per channel basis!
+
+        Check out [This Guide](https://platform.openai.com/docs/guides/prompt-engineering) for prompting help.
         """
         conf = self.db.get_conf(ctx.guild)
         if not conf.allow_sys_prompt_override:
@@ -314,7 +315,7 @@ If a file has no extension it will still try to read it only if it can be decode
                 return
 
         model = conf.get_user_model(ctx.author)
-        ptokens = await self.count_tokens(conf.prompt, conf, model) if conf.prompt else 0
+        ptokens = await self.count_tokens(conf.prompt, model) if conf.prompt else 0
         max_tokens = conf.get_user_max_tokens(ctx.author)
         if ptokens > (max_tokens * 0.9):
             txt = _(
@@ -334,7 +335,7 @@ If a file has no extension it will still try to read it only if it can be decode
     @commands.command(name="convoshow", aliases=["showconvo"])
     @commands.guild_only()
     @commands.guildowner()
-    async def show_convo(self, ctx: commands.Context, *, user: discord.Member = None):
+    async def show_convo(self, ctx: commands.Context, user: discord.Member = None, channel: discord.TextChannel = None):
         """
         View the current transcript of a conversation
 
@@ -342,27 +343,33 @@ If a file has no extension it will still try to read it only if it can be decode
         """
         if not user:
             user = ctx.author
+        if not channel:
+            channel = ctx.channel
+
         conf = self.db.get_conf(ctx.guild)
         mem_id = ctx.channel.id if conf.collab_convos else user.id
-        conversation = self.db.get_conversation(mem_id, ctx.channel.id, ctx.guild.id)
+        conversation = self.db.get_conversation(mem_id, channel.id, ctx.guild.id)
         if not conversation.messages:
             return await ctx.send(_("You have no conversation in this channel!"))
 
-        text = ""
-        for message in conversation.messages:
-            text += f"{json.dumps(message, indent=2)}\n"
+        if await self.bot.is_mod(user) or ctx.author.id in self.bot.owner_ids:
+            dump = json.dumps(conversation.messages, indent=2)
+            file = text_to_file(dump, "conversation.json")
+        else:
+            buffer = StringIO()
+            for message in conversation.messages:
+                name = message.get("name", message["role"])
+                content = message["content"]
+                buffer.write(f"{name}: {content}\n")
+            file = text_to_file(buffer.getvalue(), "conversation.txt")
 
-        buffer = BytesIO(text.encode())
-        buffer.name = f"{ctx.author.name}_transcript.txt"
-        buffer.seek(0)
-        file = discord.File(buffer)
         await ctx.send(_("Here is your conversation transcript!"), file=file)
 
     @commands.command(name="query")
     @commands.bot_has_permissions(embed_links=True)
     async def test_embedding_response(self, ctx: commands.Context, *, query: str):
         """
-        Fetch related embeddings according to the current settings along with their scores
+        Fetch related embeddings according to the current topn setting along with their scores
 
         You can use this to fine-tune the minimum relatedness for your assistant
         """
@@ -378,7 +385,7 @@ If a file has no extension it will still try to read it only if it can be decode
             if not query_embedding:
                 return await ctx.send(_("Failed to get embedding for your query"))
 
-            embeddings = await asyncio.to_thread(conf.get_related_embeddings, query_embedding)
+            embeddings = await asyncio.to_thread(conf.get_related_embeddings, query_embedding, relatedness_override=0.1)
             if not embeddings:
                 return await ctx.send(_("No embeddings could be related to this query with the current settings"))
             for name, em, score, dimension in embeddings:

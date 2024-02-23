@@ -15,8 +15,8 @@ class AssistantUtils(Functions, commands.Cog, metaclass=CompositeMetaClass):
     Assistant Utils adds pre-baked functions to the Assistant cog, allowing extended functionality.
     """
 
-    __author__ = "Vertyco#0117"
-    __version__ = "0.0.1"
+    __author__ = "vertyco"
+    __version__ = "0.0.2"
 
     def __init__(self, bot: Red):
         super().__init__()

@@ -32,7 +32,7 @@ class Functions(MixinMeta):
             "name": "create_ticket_for_user",
             "description": (
                 "Create a support ticket for the user you are speaking with if you are unable to help sufficiently. "
-                "Use `get_ticket_types` function before this one to get the panel names and response section requirements."
+                "Use `get_ticket_types` function before this one to get the panel names and response section requirements. "
             ),
             "parameters": {
                 "type": "object",
@@ -43,23 +43,23 @@ class Functions(MixinMeta):
                     },
                     "answer1": {
                         "type": "string",
-                        "description": "The response to the first ticket question or prompt.",
+                        "description": "The answer to the first question if one exists.",
                     },
                     "answer2": {
                         "type": "string",
-                        "description": "The response to the second ticket question or prompt.",
+                        "description": "The answer to the second question if one exists.",
                     },
                     "answer3": {
                         "type": "string",
-                        "description": "The response to the third ticket question or prompt.",
+                        "description": "The answer to the third question if one exists.",
                     },
                     "answer4": {
                         "type": "string",
-                        "description": "The response to the fourth ticket question or prompt.",
+                        "description": "The answer to the fourth question if one exists.",
                     },
                     "answer5": {
                         "type": "string",
-                        "description": "The response to the fifth ticket question or prompt.",
+                        "description": "The answer to the fifth question if one exists.",
                     },
                 },
                 "required": ["panel_name"],
@@ -107,7 +107,7 @@ class Functions(MixinMeta):
             if required_roles and not any(role.id in required_roles for role in user.roles):
                 continue
 
-            txt = _("# SUPPORT TICKET PANEL: {}\n").format(panel_name)
+            txt = _("# SUPPORT TICKET PANEL NAME: {}\n").format(panel_name)
             if btext := panel_data["button_text"]:
                 txt += _("Button label: {}\n").format(btext)
 
@@ -125,6 +125,8 @@ class Functions(MixinMeta):
                     if maxlength := i["max_length"]:
                         txt += _("- Maximum length: {}\n").format(maxlength)
                     section += 1
+
+            txt += "\n"
 
             buffer.write(txt)
 
@@ -164,7 +166,14 @@ class Functions(MixinMeta):
 
         # Validate the panel_name
         if panel_name not in panels or panels[panel_name].get("disabled", False):
-            return "The specified panel does not exist or is disabled."
+            panel_names = ", ".join(list(panels.keys()))
+            txt = "The specified ticket panel does not exist!\n"
+            txt += "Use the `get_ticket_types` function to get ticket panel details!\n"
+            txt += f"Available ticket panel names are {panel_names}"
+            return txt
+
+        if panels[panel_name].get("disabled", False):
+            return "That ticket panel is disabled!"
 
         panel = panels[panel_name]
         logchannel = guild.get_channel(panel["log_channel"])
@@ -203,8 +212,13 @@ class Functions(MixinMeta):
         answers = {}
         if modal := panel.get("modal"):
             for idx, i in enumerate(list(modal.values())):
-                response = responses[idx]
-                answers[i["label"]] = str(response)
+                if i.get("required") and not responses[idx]:
+                    return f"THE FOLLOWING TICKET QUESTION WAS NOT ANSWERED!\n{i['label']}"
+                response = str(responses[idx])
+                if "DISCOVERABLE" in guild.features:
+                    response = response.replace("Discord", "").replace("discord", "")
+
+                answers[i["label"]] = response
 
         form_embed = discord.Embed()
         if answers:

@@ -1,9 +1,8 @@
 from abc import ABCMeta, abstractmethod
 from multiprocessing.pool import Pool
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Union
 
 import discord
-import tiktoken
 from discord.ext.commands.cog import CogMeta
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from redbot.core import commands
@@ -23,8 +22,6 @@ class MixinMeta(metaclass=ABCMeta):
     db: DB
     mp_pool: Pool
     registry: Dict[str, Dict[str, dict]]
-
-    tokenizer: tiktoken.core.Encoding
 
     @abstractmethod
     async def openai_status(self) -> str:
@@ -62,51 +59,23 @@ class MixinMeta(metaclass=ABCMeta):
         raise NotImplementedError
 
     @abstractmethod
-    async def count_payload_tokens(
-        self,
-        messages: List[dict],
-        conf: GuildSettings,
-        model: str = "gpt-3.5-turbo-0613",
-    ):
+    async def count_payload_tokens(self, messages: List[dict], model: str = "gpt-3.5-turbo"):
         raise NotImplementedError
 
     @abstractmethod
-    async def count_function_tokens(
-        self,
-        functions: List[dict],
-        conf: GuildSettings,
-        model: str = "gpt-3.5-turbo-0613",
-    ):
+    async def count_function_tokens(self, functions: List[dict], model: str = "gpt-3.5-turbo613"):
         raise NotImplementedError
 
     @abstractmethod
-    async def count_tokens(self, text: str, conf: GuildSettings, model: str) -> int:
+    async def count_tokens(self, text: str, model: str) -> int:
         raise NotImplementedError
 
     @abstractmethod
-    async def get_tokens(
-        self,
-        text: str,
-        conf: GuildSettings,
-        model: str = "gpt-3.5-turbo-0613",
-    ) -> list:
+    async def get_tokens(self, text: str, model: str = "gpt-3.5-turbo") -> list:
         raise NotImplementedError
 
     @abstractmethod
-    async def get_text(self, tokens: list, conf: GuildSettings) -> str:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def ensure_supports_vision(
-        self,
-        messages: List[dict],
-        conf: GuildSettings,
-        user: Optional[discord.Member],
-    ):
-        raise NotImplementedError
-
-    @abstractmethod
-    async def ensure_tool_consistency(self, messages: List[dict]) -> bool:
+    async def get_text(self, tokens: list, model: str = "gpt-3.5-turbo") -> str:
         raise NotImplementedError
 
     @abstractmethod
@@ -116,7 +85,7 @@ class MixinMeta(metaclass=ABCMeta):
         function_list: List[dict],
         conf: GuildSettings,
         user: Optional[discord.Member],
-    ) -> Tuple[List[dict], List[dict], bool]:
+    ) -> bool:
         raise NotImplementedError
 
     @abstractmethod

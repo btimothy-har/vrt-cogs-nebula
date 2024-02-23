@@ -9,6 +9,7 @@ from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import box
 
 from ..abc import MixinMeta
+from ..common.constants import MODAL_SCHEMA, TICKET_PANEL_SCHEMA
 from ..common.menu import SMALL_CONTROLS, MenuButton, menu
 from ..common.utils import prune_invalid_tickets, update_active_overview
 from ..common.views import TestButton, confirm, wait_reply
@@ -97,7 +98,7 @@ class AdminCommands(MixinMeta):
         async with self.config.guild(ctx.guild).panels() as panels:
             if panel_name in panels:
                 return await ctx.send(_("Panel already exists!"))
-            panels[panel_name] = self.ticket_panel_schema
+            panels[panel_name] = TICKET_PANEL_SCHEMA
         await ctx.send(embed=em)
 
     @tickets.command()
@@ -431,7 +432,7 @@ class AdminCommands(MixinMeta):
         foot = _("type 'cancel' to cancel at any time")
         color = ctx.author.color
 
-        modal = self.modal_schema.copy() if not existing_modal else existing_modal
+        modal = MODAL_SCHEMA.copy() if not existing_modal else existing_modal
         if preview:
             await make_preview(modal, preview)
 
@@ -779,8 +780,11 @@ class AdminCommands(MixinMeta):
         """View/Delete a ticket message for a support ticket panel"""
         panel_name = panel_name.lower()
         panels = await self.config.guild(ctx.guild).panels()
+        if not panels:
+            return await ctx.send(_("There are no panels available!\nUse ") + f"`{ctx.clean_prefix}tset addpanel` " + _("to create one."))
         if panel_name not in panels:
-            return await ctx.send(_("Panel does not exist!"))
+            valid = _("Valid panels are: ") + f"`{', '.join(list(panels.keys()))}`"
+            return await ctx.send(_("Panel does not exist!") + "\n" + valid)
         messages = panels[panel_name]["ticket_messages"]
         if not messages:
             return await ctx.send(_("This panel does not have any messages added!"))
@@ -916,12 +920,16 @@ class AdminCommands(MixinMeta):
         no_resp = f"{inactive} {singular if inactive == 1 else plural}"
         if not inactive:
             no_resp = _("Disabled")
+
+        detailed = conf.get("detailed_transcript", False)
+        transcript_type = _("Detailed") if detailed else _("Simple")
+
         msg = _("`Max Tickets:      `") + f"{conf['max_tickets']}\n"
         msg += _("`DM Alerts:        `") + f"{conf['dm']}\n"
         msg += _("`Users can Rename: `") + f"{conf['user_can_rename']}\n"
         msg += _("`Users can Close:  `") + f"{conf['user_can_close']}\n"
         msg += _("`Users can Manage: `") + f"{conf['user_can_manage']}\n"
-        msg += _("`Save Transcripts: `") + f"{conf['transcript']}\n"
+        msg += _("`Save Transcripts: `") + f"{conf['transcript']} ({transcript_type})\n"
         msg += _("`Auto Close:       `") + (_("On") if inactive else _("Off")) + "\n"
         msg += _("`NoResponseDelete: `") + no_resp
 
@@ -1316,6 +1324,21 @@ class AdminCommands(MixinMeta):
         else:
             await self.config.guild(ctx.guild).transcript.set(True)
             await ctx.send(_("Transcripts of closed tickets will now be saved"))
+
+    @tickets.command(aliases=["intertrans", "itrans", "itranscript"])
+    async def interactivetranscript(self, ctx: commands.Context):
+        """
+        (Toggle) Interactive transcripts
+
+        Transcripts will be an interactive html file to visualize the conversation from your browser.
+        """
+        toggle = await self.config.guild(ctx.guild).detailed_transcript()
+        if toggle:
+            await self.config.guild(ctx.guild).detailed_transcript.set(False)
+            await ctx.send(_("Transcripts of closed tickets will no longer be interactive"))
+        else:
+            await self.config.guild(ctx.guild).detailed_transcript.set(True)
+            await ctx.send(_("Transcripts of closed tickets will now be interactive"))
 
     @tickets.command()
     async def updatemessage(

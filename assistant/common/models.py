@@ -6,7 +6,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import discord
 import numpy as np
 import orjson
-from perftracker import perf
 from pydantic import VERSION, BaseModel, Field
 from redbot.core.bot import Red
 
@@ -40,6 +39,7 @@ class Embedding(AssistantBaseModel):
     ai_created: bool = False
     created: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
     modified: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    model: str = "text-embedding-ada-002"
 
     def created_at(self, relative: bool = False):
         t_type = "R" if relative else "F"
@@ -82,29 +82,31 @@ class GuildSettings(AssistantBaseModel):
     usage: Dict[str, Usage] = {}
     blacklist: List[int] = []  # Channel/Role/User IDs
     tutors: List[int] = []  # Role or user IDs
+    training_channel: int = 0  # Model will ask for training data here
     top_n: int = 3
-    min_relatedness: float = 0.75
-    embed_method: str = "dynamic"
+    min_relatedness: float = 0.78
+    embed_method: str = "dynamic"  # hybrid, dynamic, static, user
+    question_mode: bool = False  # If True, only the first message and messages that end with ? will have emebddings
     channel_id: Optional[int] = 0
     api_key: Optional[str] = None
     endswith_questionmark: bool = False
     min_length: int = 7
-    max_retention: int = 0
+    max_retention: int = 50
     max_retention_time: int = 1800
     max_response_tokens: int = 0
     max_tokens: int = 4000
     mention: bool = False
-    mention_respond: bool = True  # TODO: add command to toggle
-    enabled: bool = True
+    mention_respond: bool = True
+    enabled: bool = True  # Auto-reply channel
     model: str = "gpt-3.5-turbo"
-    endpoint_override: Optional[str] = None
+    embed_model: str = "text-embedding-3-small"  # Or text-embedding-3-large, text-embedding-ada-002
     collab_convos: bool = False
 
     timezone: str = "UTC"
     temperature: float = 0.0  # 0.0 - 2.0
     frequency_penalty: float = 0.0  # -2.0 - 2.0
     presence_penalty: float = 0.0  # -2.0 - 2.0
-    seed: int | None = None
+    seed: Union[int, None] = None
 
     regex_blacklist: List[str] = [r"^As an AI language model,"]
     block_failed_regex: bool = False
@@ -119,10 +121,10 @@ class GuildSettings(AssistantBaseModel):
     image_size: ImageSize = ImageSize.LARGE
 
     use_function_calls: bool = False
-    max_function_calls: int = 10  # Max calls in a row
+    max_function_calls: int = 20  # Max calls in a row
     disabled_functions: List[str] = []
+    functions_called: int = 0
 
-    @perf()
     def get_related_embeddings(
         self,
         query_embedding: List[float],
@@ -131,6 +133,9 @@ class GuildSettings(AssistantBaseModel):
     ) -> List[Tuple[str, str, float, int]]:
         def cosine_similarity(a, b):
             return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+        if not query_embedding:
+            return []
 
         # Name, text, score, dimensions
         q_length = len(query_embedding)
@@ -169,9 +174,12 @@ class GuildSettings(AssistantBaseModel):
     ) -> None:
         if model not in self.usage:
             self.usage[model] = Usage()
-        self.usage[model].total_tokens += total_tokens
-        self.usage[model].input_tokens += input_tokens
-        self.usage[model].output_tokens += output_tokens
+        if total_tokens:
+            self.usage[model].total_tokens += total_tokens
+        if input_tokens:
+            self.usage[model].input_tokens += input_tokens
+        if output_tokens:
+            self.usage[model].output_tokens += output_tokens
 
     def get_user_model(self, member: Optional[discord.Member] = None) -> str:
         if not member or not self.role_overrides:
@@ -227,7 +235,7 @@ class Conversation(AssistantBaseModel):
     def function_count(self) -> int:
         if not self.messages:
             return 0
-        return sum(i["role"] == "function" for i in self.messages)
+        return sum(i["role"] in ["function", "tool"] for i in self.messages)
 
     def is_expired(self, conf: GuildSettings, member: Optional[discord.Member] = None):
         if not conf.get_user_max_time(member):
@@ -252,26 +260,34 @@ class Conversation(AssistantBaseModel):
         self.last_updated = datetime.now().timestamp()
 
     def overwrite(self, messages: List[dict]):
-        self.reset()
-        for i in messages:
-            if i["role"] == "system":
-                continue
-            self.messages.append(i)
+        self.refresh()
+        self.messages = [i for i in messages if i["role"] != "system"]
 
-    def update_messages(self, message: str, role: str, name: str = None, tool_id: str = None) -> None:
+    def update_messages(
+        self,
+        message: str,
+        role: str,
+        name: str = None,
+        tool_id: str = None,
+        position: int = None,
+    ) -> None:
         """Update conversation cache
 
         Args:
             message (str): the message
             role (str): 'system', 'user' or 'assistant'
             name (str): the name of the bot or user
+            position (int): the index to place the message in
         """
-        message = {"role": role, "content": message}
+        message: dict = {"role": role, "content": message}
         if name:
             message["name"] = name
         if tool_id:
             message["tool_call_id"] = tool_id
-        self.messages.append(message)
+        if position:
+            self.messages.insert(position, message)
+        else:
+            self.messages.append(message)
         self.refresh()
 
     def prepare_chat(
@@ -323,8 +339,6 @@ class DB(AssistantBaseModel):
     functions: Dict[str, CustomFunction] = {}
     listen_to_bots: bool = False
 
-    endpoint_override: Optional[str] = None
-
     def get_conf(self, guild: Union[discord.Guild, int]) -> GuildSettings:
         gid = guild if isinstance(guild, int) else guild.id
         return self.configs.setdefault(gid, GuildSettings())
@@ -338,7 +352,6 @@ class DB(AssistantBaseModel):
         key = f"{member_id}-{channel_id}-{guild_id}"
         return self.conversations.setdefault(key, Conversation())
 
-    @perf()
     def prep_functions(
         self,
         bot: Red,

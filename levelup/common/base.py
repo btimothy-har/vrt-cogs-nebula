@@ -3,7 +3,6 @@ import datetime
 import logging
 import math
 import random
-import traceback
 from abc import ABC
 from io import BytesIO
 from pathlib import Path
@@ -76,15 +75,14 @@ class UserCommands(MixinMeta, ABC):
             return
         try:
             # Try running it through profile generator blind to see if it errors
-
             params = {"bg_image": image_url}
             await asyncio.to_thread(self.generate_profile, **params)
         except Exception as e:
+            log.error(f"Failed to validate image url for {ctx.author.name} in {ctx.guild.name}", exc_info=e)
             if "cannot identify image file" in str(e):
                 await ctx.send(_("Uh Oh, looks like that is not a valid image, cannot identify the file"))
                 return
             else:
-                log.warning(f"background set failed: {traceback.format_exc()}")
                 await ctx.send(_("Uh Oh, looks like that is not a valid image"))
                 return
         return True
@@ -159,7 +157,7 @@ class UserCommands(MixinMeta, ABC):
 
     # Hacky way to get user banner
     @cached(ttl=7200)
-    async def get_banner(self, user: discord.Member) -> str:
+    async def get_banner(self, user: discord.Member) -> Union[str, None]:
         req = await self.bot.http.request(discord.http.Route("GET", "/users/{uid}", uid=user.id))
         banner_id = req["banner"]
         if banner_id:
@@ -168,23 +166,46 @@ class UserCommands(MixinMeta, ABC):
 
     @commands.command(name="stars", aliases=["givestar", "addstar", "thanks"])
     @commands.guild_only()
-    async def give_star(self, ctx: commands.Context, *, user: discord.Member):
+    async def give_star(self, ctx: commands.Context, *, user: discord.Member = None):
         """
         Reward a good noodle
         Give a star to a user for being a good noodle
         """
         now = datetime.datetime.now()
-        user_id = str(user.id)
+
         star_giver = str(ctx.author.id)
         guild_id = ctx.guild.id
+
         if guild_id not in self.data:
             return await ctx.send(_("Cache not loaded yet, wait a few more seconds."))
+
+        if guild_id not in self.stars:
+            self.stars[guild_id] = {}
+
+        if not user:
+            if star_giver in self.stars[guild_id]:
+                # If no user is given and they have a cooldown, show time left
+                cooldown = self.data[guild_id]["starcooldown"]
+                lastused = self.stars[guild_id][star_giver]
+                td = now - lastused
+                td = td.total_seconds()
+                if td < cooldown:
+                    time_left = cooldown - td
+                    tstring = time_formatter(time_left)
+                    msg = _("You can give more stars in {}").format(f"**{tstring}**")
+                    return await ctx.send(msg)
+                else:
+                    msg = _("You can give more stars now! Just mention a user in this command.")
+                    return await ctx.send(msg)
+            else:
+                # If no user is given and they have no cooldown, show help
+                return await ctx.send_help()
+
         if ctx.author == user:
             return await ctx.send(_("You can't give stars to yourself!"))
         if user.bot:
             return await ctx.send(_("You can't give stars to a bot!"))
-        if guild_id not in self.stars:
-            self.stars[guild_id] = {}
+
         if star_giver not in self.stars[guild_id]:
             self.stars[guild_id][star_giver] = now
         else:
@@ -199,8 +220,10 @@ class UserCommands(MixinMeta, ABC):
                 tstring = time_formatter(time_left)
                 msg = _("You need to wait ") + f"**{tstring}**" + _(" before you can give more stars!")
                 return await ctx.send(msg)
+
         mention = self.data[guild_id]["mention"]
         users = self.data[guild_id]["users"]
+        user_id = str(user.id)
         if user_id not in users:
             return await ctx.send(_("No data available for that user yet!"))
         self.data[guild_id]["users"][user_id]["stars"] += 1
@@ -658,7 +681,7 @@ class UserCommands(MixinMeta, ABC):
 
     @set_profile.command(name="background", aliases=["bg"])
     @commands.cooldown(1, 30, commands.BucketType.user)
-    async def set_user_background(self, ctx: commands.Context, image_url: str = None):
+    async def set_user_background(self, ctx: commands.Context, image_url: Union[str, None] = None):
         """
         Set a background for your profile
 
@@ -696,38 +719,44 @@ class UserCommands(MixinMeta, ABC):
 
         # If image url is given, run some checks
         if not image_url and not get_attachments(ctx):
-            return await ctx.send(_("You must provide a url, filename, or attach a file"))
-
-        filepath = None
-        if att := get_attachments(ctx):
-            image_url = att[0].url
-            if not await self.valid_url(ctx, image_url):
-                return
-        elif image_url.lower().startswith("http"):
-            if not await self.valid_url(ctx, image_url):
-                return
-        else:
-            for file in backgrounds:
-                if image_url.lower() in file.name.lower():
-                    image_url = file.name
-                    filepath = file
-                    break
-
-        if image_url:
-            self.data[ctx.guild.id]["users"][user_id]["background"] = image_url
-            if image_url == "random":
-                await ctx.send("Your profile background will be randomized each time you run the profile command!")
+            if self.data[ctx.guild.id]["users"][user_id]["background"] is None:
+                return await ctx.send(_("You must provide a url, filename, or attach a file"))
             else:
-                # Either a valid url or a specified default file
-                if filepath:
-                    file = discord.File(filepath)
-                    await ctx.send(_("Your background image has been set to `{}`!").format(image_url), file=file)
-                else:
-                    await ctx.send(_("Your background image has been set to `{}`!").format(image_url))
+                self.data[ctx.guild.id]["users"][user_id]["background"] = None
+                return await ctx.send(_("Your background has been removed!"))
+
+        if image_url is None:
+            # User uploaded image
+            image_url = get_attachments(ctx)[0].url
+            if not await self.valid_url(ctx, image_url):
+                return
+            self.data[ctx.guild.id]["users"][user_id]["background"] = image_url
+            return await ctx.send(_("Your profile background has been set!"))
+
+        if image_url.lower() == "random":
+            self.data[ctx.guild.id]["users"][user_id]["background"] = "random"
+            return await ctx.send(
+                _("Your profile background will be randomized each time you run the profile command!")
+            )
+
+        # Check if the user provided a url
+        if image_url.lower().startswith("http"):
+            if not await self.valid_url(ctx, image_url):
+                return
+            return await ctx.send(_("Your profile background has been set!"))
         else:
-            self.data[ctx.guild.id]["users"][user_id]["background"] = None
-            await ctx.send(_("Your background has been removed since you did not specify a url!"))
-        await ctx.tick()
+            # Check if the user provided a filename
+            for path in backgrounds:
+                if image_url.lower() in path.name.lower():
+                    break
+            else:
+                return await ctx.send(_("I could not find a background image with that name"))
+
+            txt = _("Your background image has been set to `{}`!").format(path.name)
+
+            file = discord.File(path)
+            self.data[ctx.guild.id]["users"][user_id]["background"] = file.filename
+            return await ctx.send(txt, file=file)
 
     @set_profile.command(name="font")
     async def set_user_font(self, ctx: commands.Context, *, font_name: str):
@@ -784,6 +813,8 @@ class UserCommands(MixinMeta, ABC):
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def get_profile(self, ctx: commands.Context, *, user: discord.Member = None):
         """View your profile"""
+        if not isinstance(ctx.author, discord.Member):
+            return
         if not user:
             user = ctx.author
         if user.bot:
@@ -819,6 +850,8 @@ class UserCommands(MixinMeta, ABC):
             role_icon = user.top_role.display_icon
             if isinstance(role_icon, str):
                 role_icon = get_twemoji(role_icon)
+            elif role_icon:
+                role_icon = role_icon.url
         else:
             pfp = user.avatar_url
 
@@ -860,7 +893,8 @@ class UserCommands(MixinMeta, ABC):
 
             if not emoji:
                 # Get default
-                emoji = get_emoji(default_guild["buttons"][name])
+                log.error(f"Failed to get emoji for {name}, using default")
+                emoji = default_guild["emojis"][name]
 
             return emoji
 
@@ -904,6 +938,12 @@ class UserCommands(MixinMeta, ABC):
                     "stat": hex_to_rgb(colors["stat"]) if colors["stat"] else None,
                     "levelbar": hex_to_rgb(colors["levelbar"]) if colors["levelbar"] else None,
                 }
+                if isinstance(emoji, dict):
+                    emoji_icon = emoji["url"]
+                else:
+                    emoji_icon = None
+                    if emoji is not None:
+                        log.error(f"Invalid prestige emoji icon: {emoji}")
 
                 args = {
                     "bg_image": bg_image,  # Background image link
@@ -919,7 +959,7 @@ class UserCommands(MixinMeta, ABC):
                     "messages": humanize_number(messages),
                     "voice": time_formatter(voice),
                     "prestige": prestige,
-                    "emoji": emoji["url"] if emoji and isinstance(emoji, dict) else None,
+                    "emoji": emoji_icon,
                     "stars": stars,
                     "balance": bal if showbal else 0,
                     "currency": currency_name,

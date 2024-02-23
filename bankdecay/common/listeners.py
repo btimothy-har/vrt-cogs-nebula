@@ -14,7 +14,6 @@ class Listeners(MixinMeta):
         if message.author.bot:
             return
         self.db.refresh_user(message.author)
-        await self.save()
 
     @commands.Cog.listener()
     async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
@@ -27,25 +26,32 @@ class Listeners(MixinMeta):
         if author.bot:
             return
         self.db.refresh_user(author)
-        await self.save()
 
     @commands.Cog.listener()
-    async def on_reaction_add(self, reaction: discord.Reaction, user: discord.Member | discord.User) -> None:
-        if not user.guild:
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        if not payload.guild_id:
             return
-        if user.bot:
+        guild = self.bot.get_guild(payload.guild_id)
+        if not guild:
             return
-        self.db.refresh_user(user)
-        await self.save()
+        if not payload.member:
+            return
+        if payload.member.bot:
+            return
+        self.db.refresh_user(payload.member)
 
     @commands.Cog.listener()
-    async def on_reaction_remove(self, reaction: discord.Reaction, user: discord.Member | discord.User) -> None:
-        if not user.guild:
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
+        if not payload.guild_id:
             return
-        if user.bot:
+        guild = self.bot.get_guild(payload.guild_id)
+        if not guild:
             return
-        self.db.refresh_user(user)
-        await self.save()
+        if not payload.member:
+            return
+        if payload.member.bot:
+            return
+        self.db.refresh_user(payload.member)
 
     @commands.Cog.listener()
     async def on_presence_update(self, before: discord.Member, after: discord.Member) -> None:
@@ -56,7 +62,6 @@ class Listeners(MixinMeta):
         if author.bot:
             return
         self.db.refresh_user(author)
-        await self.save()
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
@@ -67,7 +72,6 @@ class Listeners(MixinMeta):
         if author.bot:
             return
         self.db.refresh_user(author)
-        await self.save()
 
     @commands.Cog.listener()
     async def on_voice_state_update(
@@ -78,4 +82,3 @@ class Listeners(MixinMeta):
         if member.bot:
             return
         self.db.refresh_user(member)
-        await self.save()

@@ -1,36 +1,22 @@
 MODELS = {
     "gpt-3.5-turbo": 4096,
-    "gpt-3.5-turbo-0301": 4096,
-    "gpt-3.5-turbo-0613": 4096,
     "gpt-3.5-turbo-1106": 16385,
+    "gpt-3.5-turbo-0125": 16385,
     "gpt-3.5-turbo-16k": 16384,
-    "gpt-3.5-turbo-16k-0301": 16384,
-    "gpt-3.5-turbo-16k-0613": 16384,
     "gpt-3.5-turbo-instruct": 8192,
-    "gpt-3.5-turbo-instruct-0914": 8192,
     "gpt-4": 8192,
-    "gpt-4-0301": 8192,
-    "gpt-4-0613": 8192,
     "gpt-4-32k": 32768,
-    "gpt-4-32k-0301": 32768,
-    "gpt-4-32k-0613": 32768,
+    "gpt-4-turbo-preview": 128000,
     "gpt-4-1106-preview": 128000,
-    "gpt-4-vision-preview": 4096,
-    "gpt-4-1106-vision-preview": 4096,
-    "code-davinci-002": 8001,
-    "text-davinci-003": 4097,
-    "text-davinci-002": 4097,
-    "text-curie-001": 2049,
-    "text-babbage-001": 2049,
-    "text-ada-001": 2049,
-    "text-embedding-ada-002": 8191,
-    "text-embedding-ada-002-v2": 8191,
+    "gpt-4-0125-preview": 128000,
+    "gpt-4-vision-preview": 128000,
 }
 PRICES = {
-    "gpt-3.5-turbo": [0.0015, 0.002],
+    "gpt-3.5-turbo": [0.001, 0.0015],
     "gpt-3.5-turbo-0301": [0.0015, 0.002],
     "gpt-3.5-turbo-0613": [0.0015, 0.002],
     "gpt-3.5-turbo-1106": [0.001, 0.002],
+    "gpt-3.5-turbo-0125": [0.0005, 0.0015],
     "gpt-3.5-turbo-16k": [0.003, 0.004],
     "gpt-3.5-turbo-16k-0301": [0.003, 0.004],
     "gpt-3.5-turbo-16k-0613": [0.003, 0.004],
@@ -39,7 +25,9 @@ PRICES = {
     "gpt-4": [0.03, 0.06],
     "gpt-4-0301": [0.03, 0.06],
     "gpt-4-0613": [0.03, 0.06],
+    "gpt-4-turbo-preview": [0.01, 0.03],
     "gpt-4-1106-preview": [0.01, 0.03],
+    "gpt-4-0125-preview": [0.01, 0.03],
     "gpt-4-vision-preview": [0.01, 0.03],
     "gpt-4-1106-vision-preview": [0.01, 0.03],
     "gpt-4-32k": [0.06, 0.12],
@@ -53,12 +41,17 @@ PRICES = {
     "code-davinci-002": [0.03, 0.12],
     "text-embedding-ada-002": [0.0001, 0.0001],
     "text-embedding-ada-002-v2": [0.0001, 0.0001],
+    "text-embedding-3-small": [0.00002, 0.00002],
+    "text-embedding-3-large": [0.00013, 0.00013],
 }
-MODELS_1106 = [
+SUPPORTS_SEED = [
     "gpt-3.5-turbo-1106",
+    "gpt-3.5-turbo-0125",
     "gpt-4-1106-preview",
     "gpt-4-vision-preview",
     "gpt-4-1106-vision-preview",
+    "gpt-4-turbo-preview",
+    "gpt-4-0125-preview",
 ]
 SUPPORTS_VISION = [
     "gpt-4-vision-preview",
@@ -66,47 +59,10 @@ SUPPORTS_VISION = [
 ]
 SUPPORTS_TOOLS = [
     "gpt-3.5-turbo-1106",
+    "gpt-3.5-turbo-0125",
     "gpt-4-1106-preview",
-]
-SUPPORTS_FUNCTIONS = [
-    "gpt-3.5-turbo",
-    "gpt-3.5-turbo-0613",
-    "gpt-3.5-turbo-1106",
-    "gpt-3.5-turbo-16k",
-    "gpt-3.5-turbo-16k-0613",
-    "gpt-4",
-    "gpt-4-0613",
-    "gpt-4-32k",
-    "gpt-4-32k-0613",
-    "gpt-4-1106-preview",
-]
-CHAT = [
-    "gpt-3.5-turbo",
-    "gpt-3.5-turbo-0301",
-    "gpt-3.5-turbo-0613",
-    "gpt-3.5-turbo-1106",
-    "gpt-3.5-turbo-16k",
-    "gpt-3.5-turbo-16k-0301",
-    "gpt-3.5-turbo-16k-0613",
-    "gpt-4",
-    "gpt-4-0301",
-    "gpt-4-0613",
-    "gpt-4-32k",
-    "gpt-4-32k-0301",
-    "gpt-4-32k-0613",
-    "gpt-4-1106-preview",
-    "gpt-4-vision-preview",
-    "gpt-4-1106-vision-preview",
-    "code-davinci-002",
-]
-COMPLETION = [
-    "text-davinci-003",
-    "text-davinci-002",
-    "text-curie-001",
-    "text-babbage-001",
-    "text-ada-001",
-    "gpt-3.5-turbo-instruct",
-    "gpt-3.5-turbo-instruct-0914",
+    "gpt-4-0125-preview",
+    "gpt-4-turbo-preview",
 ]
 READ_EXTENSIONS = [
     ".txt",
@@ -137,6 +93,9 @@ READ_EXTENSIONS = [
     ".ts",
     ".cs",
     ".c++",
+    ".cpp",
+    ".cbp",
+    ".h",
     ".cc",
     ".ps1",
     ".bat",
@@ -145,12 +104,27 @@ READ_EXTENSIONS = [
     ".env",
     ".sh",
     ".bat",
+    ".pde",
 ]
 REACT_SUMMARY_MESSAGE = """
-Your job is to summarize text to use as embeddings. Respond only with the summary of the text.
+You are SummaryGPT, an AI creates memories from conversations.
+
+You will be given a snippet of text to summarize based on a larger conversation.
+This text will be stored as your "Memory" and will be used to provide context for future conversations.
+
+# RULES
+- OUTPUT ONLY THE SUMMARY WITHOUT THE ORIGINAL TEXT OR EXTRA DIALOGUE FROM YOU.
+- KEEP THE SUMMARY SHORT AND TO THE POINT.
 """
 REACT_NAME_MESSAGE = """
-Your job is to read a snippet of text and come up with a short descriptive name for it. Only respond with the name of the summary.
+You are NameGPT, an AI that creates names for things.
+
+You will read a snippet of text, and come up with a short name for it based on the text.
+For example, given a text snippet about the winter olympics, you might come up with the name "Winter Olympics".
+
+# RULES
+- OUTPUT ONLY THE NAME WITHOUT THE ORIGINAL TEXT OR EXTRA DIALOGUE FROM YOU.
+- KEEP THE NAME LESS THAN 40 CHARACTERS OR 3 WORDS TOPS.
 """
 
 CREATE_MEMORY = {
@@ -179,7 +153,7 @@ SEARCH_MEMORIES = {
         "properties": {
             "search_query": {
                 "type": "string",
-                "description": "the keyword or query you want to find information about",
+                "description": "a sentence or phrase that describes what you are looking for, this should be as specific as possible, it will be tokenized to find the best match with related embeddings.",
             },
             "amount": {
                 "type": "integer",
@@ -213,5 +187,19 @@ LIST_MEMORIES = {
     "parameters": {
         "type": "object",
         "properties": {},
+    },
+}
+REQUEST_TRAINING = {
+    "name": "request_training",
+    "description": "Notify staff that you require additional training data for a topic.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "message": {
+                "type": "string",
+                "description": "The thing you want to be trained on. Include as much context as possible from the current conversation.",
+            },
+        },
+        "required": ["message"],
     },
 }

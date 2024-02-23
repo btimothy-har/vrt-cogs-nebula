@@ -3,33 +3,22 @@ import inspect
 import json
 import logging
 import math
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import aiohttp
 import discord
 import tiktoken
-from aiohttp import ClientConnectionError
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
-from openai.types.completion import Completion
-from openai.types.completion_choice import CompletionChoice
 from openai.types.create_embedding_response import CreateEmbeddingResponse
-from perftracker import perf
 from redbot.core import commands
 from redbot.core.i18n import Translator, cog_i18n
 from redbot.core.utils.chat_formatting import box, humanize_number
 
 from ..abc import MixinMeta
-from .calls import (
-    request_chat_completion_raw,
-    request_completion_raw,
-    request_embedding_raw,
-    request_text_raw,
-    request_tokens_raw,
-)
-from .constants import CHAT, MODELS, SUPPORTS_VISION
+from .calls import request_chat_completion_raw, request_embedding_raw
+from .constants import MODELS
 from .models import GuildSettings
-from .utils import compile_messages
 
 log = logging.getLogger("red.vrt.assistant.api")
 _ = Translator("Assistant", __file__)
@@ -37,7 +26,6 @@ _ = Translator("Assistant", __file__)
 
 @cog_i18n(_)
 class API(MixinMeta):
-    @perf()
     async def openai_status(self) -> str:
         try:
             timeout = aiohttp.ClientTimeout(total=5)
@@ -48,7 +36,7 @@ class API(MixinMeta):
                     # ind = data["status"]["indicator"]
         except Exception as e:
             log.error("Failed to fetch OpenAI API status", exc_info=e)
-            status = _("Failed to fetch!")
+            status = _("Failed to fetch: {}").format(str(e))
         return status
 
     async def request_response(
@@ -59,26 +47,17 @@ class API(MixinMeta):
         member: Optional[discord.Member] = None,
         response_token_override: int = None,
     ) -> ChatCompletionMessage:
-        api_base = conf.endpoint_override or self.db.endpoint_override
-        api_key = "unset"
-        if conf.api_key:
-            api_base = None
-            api_key = conf.api_key
-
         model = conf.get_user_model(member)
 
         max_convo_tokens = self.get_max_tokens(conf, member)
         max_response_tokens = conf.get_user_max_response_tokens(member)
 
-        # Overestimate by 5%
-        current_convo_tokens = await self.count_payload_tokens(messages, conf, model)
+        current_convo_tokens = await self.count_payload_tokens(messages, model)
         if functions:
-            current_convo_tokens += await self.count_function_tokens(functions, conf, model)
-
-        current_convo_tokens = round(current_convo_tokens * 1.05)
+            current_convo_tokens += await self.count_function_tokens(functions, model)
 
         # Dynamically adjust to lower model to save on cost
-        if "-16k" in model and current_convo_tokens < 2000:
+        if "-16k" in model and current_convo_tokens < 3000:
             model = model.replace("-16k", "")
         if "-32k" in model and current_convo_tokens < 4000:
             model = model.replace("-32k", "")
@@ -99,33 +78,23 @@ class API(MixinMeta):
                 # Use the lesser of caculated vs set response tokens
                 response_tokens = min(response_tokens, max_response_tokens)
 
-        if model in CHAT:
-            response: ChatCompletion = await request_chat_completion_raw(
-                model=model,
-                messages=messages,
-                temperature=conf.temperature,
-                api_key=api_key,
-                max_tokens=response_tokens,
-                api_base=api_base,
-                functions=functions,
-                frequency_penalty=conf.frequency_penalty,
-                presence_penalty=conf.presence_penalty,
-                seed=conf.seed,
-            )
-            message: ChatCompletionMessage = response.choices[0].message
-        else:
-            compiled = compile_messages(messages)
-            prompt = await self.cut_text_by_tokens(compiled, conf, member)
-            response: Completion = await request_completion_raw(
-                model=model,
-                prompt=prompt,
-                temperature=conf.temperature,
-                api_key=api_key,
-                max_tokens=response_tokens,
-                api_base=api_base,
-            )
-            choice: CompletionChoice = response.choices[0]
-            message = ChatCompletionMessage.model_validate({"role": "assistant", "content": choice.text})
+        if model not in MODELS:
+            log.error(f"This model is not longer supported: {model}. Switching to gpt-3.5-turbo")
+            model = "gpt-3.5-turbo"
+            await self.save_conf()
+
+        response: ChatCompletion = await request_chat_completion_raw(
+            model=model,
+            messages=messages,
+            temperature=conf.temperature,
+            api_key=conf.api_key,
+            max_tokens=response_tokens,
+            functions=functions,
+            frequency_penalty=conf.frequency_penalty,
+            presence_penalty=conf.presence_penalty,
+            seed=conf.seed,
+        )
+        message: ChatCompletionMessage = response.choices[0].message
 
         conf.update_usage(
             response.model,
@@ -137,15 +106,7 @@ class API(MixinMeta):
         return message
 
     async def request_embedding(self, text: str, conf: GuildSettings) -> List[float]:
-        if conf.api_key:
-            api_base = None
-            api_key = conf.api_key
-        else:
-            log.debug("Using external embedder")
-            api_base = conf.endpoint_override or self.db.endpoint_override
-            api_key = "unset"
-
-        response: CreateEmbeddingResponse = await request_embedding_raw(text, api_key, api_base)
+        response: CreateEmbeddingResponse = await request_embedding_raw(text, conf.api_key, conf.embed_model)
 
         conf.update_usage(
             response.model,
@@ -161,52 +122,19 @@ class API(MixinMeta):
     # -------------------------------------------------------
     # -------------------------------------------------------
 
-    async def count_payload_tokens(
-        self,
-        messages: List[dict],
-        conf: GuildSettings,
-        model: str = "gpt-3.5-turbo-0613",
-    ):
+    async def count_payload_tokens(self, messages: List[dict], model: str = "gpt-3.5-turbo"):
         if not messages:
             return 0
-        if not conf.api_key and (conf.endpoint_override or self.db.endpoint_override):
-            log.debug("Using external tokenizer")
-            endpoint = conf.endpoint_override or self.db.endpoint_override
-            num_tokens = 0
-            valid_endpoint = True
-            for message in messages:
-                if not valid_endpoint:
-                    break
-                num_tokens += 4  # every message follows <im_start>{role/name}\n{content}<im_end>\n
-                for key, value in message.items():
-                    if not value:
-                        continue
-                    if isinstance(value, list):
-                        for i in value:
-                            if i["type"] == "image_url":
-                                num_tokens += 65
-                                continue
-                            try:
-                                tokens = await request_tokens_raw(i, f"{endpoint}/tokenize")
-                                num_tokens += len(tokens)
-                            except (KeyError, ClientConnectionError):  # API probably old or bad endpoint
-                                # Break and fall back to local encoder
-                                valid_endpoint = False
-                    try:
-                        tokens = await request_tokens_raw(value, f"{endpoint}/tokenize")
-                        num_tokens += len(tokens)
-                        if key == "name":  # if there's a name, the role is omitted
-                            num_tokens += -1  # role is always required and always 1 token
-                    except (KeyError, ClientConnectionError):  # API probably old or bad endpoint
-                        # Break and fall back to local encoder
-                        valid_endpoint = False
-                num_tokens += 2  # every reply is primed with <im_start>assistant
-            else:
-                return num_tokens
-        try:
-            encoding = tiktoken.encoding_for_model(model)
-        except KeyError:
-            encoding = tiktoken.get_encoding("cl100k_base")
+
+        def _get_encoding():
+            try:
+                enc = tiktoken.encoding_for_model(model)
+            except KeyError:
+                enc = tiktoken.get_encoding("cl100k_base")
+            return enc
+
+        encoding = await asyncio.to_thread(_get_encoding)
+
         num_tokens = 0
         for message in messages:
             num_tokens += 4  # every message follows <im_start>{role/name}\n{content}<im_end>\n
@@ -238,31 +166,16 @@ class API(MixinMeta):
         num_tokens += 2  # every reply is primed with <im_start>assistant
         return num_tokens
 
-    async def count_function_tokens(
-        self,
-        functions: List[dict],
-        conf: GuildSettings,
-        model: str = "gpt-3.5-turbo-0613",
-    ):
-        if not conf.api_key and (conf.endpoint_override or self.db.endpoint_override):
-            log.debug("Using external tokenizer")
-            endpoint = conf.endpoint_override or self.db.endpoint_override
-            num_tokens = 0
-            for func in functions:
-                dump = json.dumps(func)
-                try:
-                    tokens = await request_tokens_raw(dump, f"{endpoint}/tokenize")
-                    num_tokens += len(tokens)
-                except (KeyError, ClientConnectionError):  # API probably old or bad endpoint
-                    # Break and fall back to local encoder
-                    break
-            else:
-                return num_tokens
+    async def count_function_tokens(self, functions: List[dict], model: str = "gpt-3.5-turbo"):
+        def _get_encoding():
+            try:
+                enc = tiktoken.encoding_for_model(model)
+            except KeyError:
+                enc = tiktoken.get_encoding("cl100k_base")
+            return enc
 
-        try:
-            encoding = tiktoken.encoding_for_model(model)
-        except KeyError:
-            encoding = tiktoken.get_encoding("cl100k_base")
+        encoding = await asyncio.to_thread(_get_encoding)
+
         num_tokens = 0
         for func in functions:
             dump = json.dumps(func)
@@ -270,12 +183,7 @@ class API(MixinMeta):
             num_tokens += len(encoded)
         return num_tokens
 
-    async def get_tokens(
-        self,
-        text: str,
-        conf: GuildSettings,
-        model: str = "gpt-3.5-turbo-0613",
-    ) -> list:
+    async def get_tokens(self, text: str, model: str = "gpt-3.5-turbo") -> list:
         """Get token list from text"""
         if not text:
             log.debug("No text to get tokens from!")
@@ -283,47 +191,30 @@ class API(MixinMeta):
         if isinstance(text, bytes):
             text = text.decode(encoding="utf-8")
 
-        if not conf.api_key and (conf.endpoint_override or self.db.endpoint_override):
-            log.debug("Using external tokenizer")
-            endpoint = conf.endpoint_override or self.db.endpoint_override
+        def _get_encoding():
             try:
-                return await request_tokens_raw(text, f"{endpoint}/tokenize")
-            except (KeyError, ClientConnectionError):  # API probably old or bad endpoint
-                pass
+                enc = tiktoken.encoding_for_model(model)
+            except KeyError:
+                enc = tiktoken.get_encoding("cl100k_base")
+            return enc
 
-        try:
-            encoding = tiktoken.encoding_for_model(model)
-        except KeyError:
-            encoding = tiktoken.get_encoding("cl100k_base")
+        encoding = await asyncio.to_thread(_get_encoding)
 
         return await asyncio.to_thread(encoding.encode, text)
 
-    async def count_tokens(self, text: str, conf: GuildSettings, model: str) -> int:
+    async def count_tokens(self, text: str, model: str) -> int:
         if not text:
             log.debug("No text to get token count from!")
-            # raise Exception("No text to get token count from!")
             return 0
-        tokens = await self.get_tokens(text, conf, model)
+        tokens = await self.get_tokens(text, model)
         return len(tokens)
 
     async def can_call_llm(self, conf: GuildSettings, ctx: Optional[commands.Context] = None) -> bool:
-        cant = [
-            not conf.api_key,
-            conf.endpoint_override is None,
-            self.db.endpoint_override is None,
-        ]
-        if all(cant):
+        if not conf.api_key:
             if ctx:
                 txt = _("There are no API keys set!\n")
                 if ctx.author.id == ctx.guild.owner_id:
                     txt += _("- Set your OpenAI key with `{}`\n").format(f"{ctx.clean_prefix}assist openaikey")
-                    txt += _("- Or set an endpoint override to your self-hosted LLM with `{}`\n").format(
-                        f"{ctx.clean_prefix}assist endpoint"
-                    )
-                if ctx.author.id in self.bot.owner_ids:
-                    txt += _("- Alternatively you can set a global endpoint with `{}`").format(
-                        f"{ctx.clean_prefix}assist globalendpoint"
-                    )
                 await ctx.send(txt)
             return False
         return True
@@ -339,14 +230,21 @@ class API(MixinMeta):
         sample = list(conf.embeddings.values())[0]
         sample_embed = await self.request_embedding(sample.text, conf)
 
+        async def update_embedding(name: str, text: str):
+            conf.embeddings[name].embedding = await self.request_embedding(text, conf)
+            conf.embeddings[name].update()
+            conf.embeddings[name].model = conf.embed_model
+            log.debug(f"Updated embedding: {name}")
+
         synced = 0
+        tasks = []
         for name, em in conf.embeddings.items():
-            if len(em.embedding) != len(sample_embed):
-                em.embedding = await self.request_embedding(em.text, conf)
+            if conf.embed_model != em.model or len(em.embedding) != len(sample_embed):
                 synced += 1
-                log.debug(f"Updating embedding {name}")
+                tasks.append(update_embedding(name, em.text))
 
         if synced:
+            await asyncio.gather(*tasks)
             await self.save_conf()
         return synced
 
@@ -358,99 +256,47 @@ class API(MixinMeta):
         if not text:
             log.debug("No text to cut by tokens!")
             return text
-        tokens = await self.get_tokens(text, conf, conf.get_user_model(user))
-        return await self.get_text(tokens[: self.get_max_tokens(conf, user)], conf)
+        tokens = await self.get_tokens(text, conf.get_user_model(user))
+        return await self.get_text(tokens[: self.get_max_tokens(conf, user)], conf.get_user_model(user))
 
-    async def get_text(self, tokens: list, conf: GuildSettings) -> str:
+    async def get_text(self, tokens: list, model: str = "gpt-3.5-turbo") -> str:
         """Get text from token list"""
 
-        if not conf.api_key and (conf.endpoint_override or self.db.endpoint_override):
-            log.debug("Using external tokenizer")
-            endpoint = conf.endpoint_override or self.db.endpoint_override
-            return await request_text_raw(tokens, f"{endpoint}/untokenize")
+        def _get_encoding():
+            try:
+                enc = tiktoken.encoding_for_model(model)
+            except KeyError:
+                enc = tiktoken.get_encoding("cl100k_base")
+            return enc
 
-        return await asyncio.to_thread(self.tokenizer.decode, tokens)
+        encoding = await asyncio.to_thread(_get_encoding)
+
+        return await asyncio.to_thread(encoding.decode, tokens)
 
     # -------------------------------------------------------
     # -------------------------------------------------------
     # -------------------- FORMATTING -----------------------
     # -------------------------------------------------------
     # -------------------------------------------------------
-    async def ensure_supports_vision(
-        self,
-        messages: List[dict],
-        conf: GuildSettings,
-        user: Optional[discord.Member],
-    ):
-        model = conf.get_user_model(user)
-        if model not in SUPPORTS_VISION:
-            for idx, message in enumerate(messages):
-                if isinstance(message["content"], list):
-                    for obj in message["content"]:
-                        if obj["type"] != "text":
-                            continue
-                        messages[idx]["content"] = obj["text"]
-                        break
 
-    async def ensure_tool_consistency(self, messages: List[dict]) -> bool:
-        cleaned = False
-        # Mapping from tool_call id to the index of the response message
-        tool_response_positions = {}
-        # Mapping from tool_call id to the index of the call message
-        tool_call_positions = {}
-        # List of tool_call ids awaiting a response
-        awaiting_responses = set()
-
-        # First pass: Map tool_calls and tool_responses and mark those awaiting responses.
-        for idx, msg in enumerate(messages):
-            if msg.get("role") == "assistant" and "tool_calls" in msg:
-                # Process all tool_calls within this assistant message
-                for tool_call in msg["tool_calls"]:
-                    tool_call_id = tool_call["id"]
-                    tool_call_positions[tool_call_id] = idx
-                    awaiting_responses.add(tool_call_id)
-            elif msg.get("role") == "tool":
-                tool_call_id = msg["tool_call_id"]
-
-                tool_response_positions[tool_call_id] = idx
-                # If this response matches an awaiting call, remove from the awaiting set
-                if tool_call_id in awaiting_responses:
-                    awaiting_responses.remove(tool_call_id)
-
-        # Second pass: Remove all tool_calls that don't have responses or have misplaced responses.
-        tool_call_ids = list(tool_call_positions.keys())
-        for tool_call_id in tool_call_ids:
-            call_pos = tool_call_positions[tool_call_id]
-            response_pos = tool_response_positions.get(tool_call_id)
-
-            if tool_call_id in awaiting_responses or (response_pos and response_pos <= call_pos):
-                cleaned = True
-                messages.pop(call_pos)
-                # Update the stored positions because we've altered the messages list.
-                del tool_call_positions[tool_call_id]
-                if response_pos:
-                    del tool_response_positions[tool_call_id]
-                # Adjust subsequent message positions
-                for key, pos in tool_call_positions.items():
-                    if pos > call_pos:
-                        tool_call_positions[key] = pos - 1
-                for key, pos in tool_response_positions.items():
-                    if pos > call_pos:
-                        tool_response_positions[key] = pos - 1
-                # Restart the check as the messages list has changed.
-                return await self.ensure_tool_consistency(messages)
-
-        return cleaned
-
-    @perf()
     async def degrade_conversation(
         self,
         messages: List[dict],
         function_list: List[dict],
         conf: GuildSettings,
         user: Optional[discord.Member],
-    ) -> Tuple[List[dict], List[dict], bool]:
-        """Iteratively degrade a conversation payload, prioritizing more recent messages and critical context
+    ) -> bool:
+        """
+        Iteratively degrade a conversation payload in-place to fit within the max token limit, prioritizing more recent messages and critical context.
+
+        Order of importance:
+        - System messages
+        - Function calls available to model
+        - Most recent user message
+        - Most recent assistant message
+        - Most recent function/tool message
+
+        System messages are always ignored.
 
         Args:
             messages (List[dict]): message entries sent to the api
@@ -458,161 +304,162 @@ class API(MixinMeta):
             conf: (GuildSettings): current settings
 
         Returns:
-            Tuple[List[dict], List[dict], bool]: updated messages list, function list, and whether the conversation was degraded
+            bool: whether the conversation was degraded
         """
-        messages = messages.copy()
-        function_list = function_list.copy()
 
-        def _degrade_message(msg: str) -> str:
-            words = msg.split()
+        def _degrade_text(txt: str) -> str:
+            words = txt.split()
             if len(words) > 1:
                 return " ".join(words[:-1])
             else:
                 return ""
 
+        def _most_recent():
+            most_recent_user = most_recent_assistant = most_recent_tool = None
+            for idx, msg in enumerate(reversed(messages)):
+                if msg["role"] in ["tool", "function"] and not most_recent_tool:
+                    most_recent_tool = len(messages) - 1 - idx
+                elif msg["role"] == "assistant" and not most_recent_assistant:
+                    most_recent_assistant = len(messages) - 1 - idx
+                elif msg["role"] == "user" and not most_recent_user:
+                    most_recent_user = len(messages) - 1 - idx
+                elif most_recent_user and most_recent_assistant and most_recent_tool:
+                    break
+            return most_recent_user, most_recent_assistant, most_recent_tool
+
+        # Fetch the current model
         model = conf.get_user_model(user)
-        total_tokens = await self.count_payload_tokens(messages, conf, model)
-        total_tokens += await self.count_function_tokens(function_list, conf, model)
+        # Fetch the max response tokens for the current user
+        conf.get_user_max_response_tokens(user)
+        # Fetch the max token limit for the current user
+        max_tokens = self.get_max_tokens(conf, user)
+
+        # Token count of current conversation
+        convo_tokens = await self.count_payload_tokens(messages, model)
+        # Token count of function calls available to model
+        function_tokens = await self.count_function_tokens(function_list, model)
+        total_tokens_used = convo_tokens + function_tokens
 
         # Check if the total token count is already under the max token limit
-        max_response_tokens = conf.get_user_max_response_tokens(user)
-        max_tokens = self.get_max_tokens(conf, user)
-        if max_tokens > max_response_tokens:
-            max_tokens = max_tokens - max_response_tokens
+        if total_tokens_used <= max_tokens:
+            return False
 
-        if total_tokens <= max_tokens:
-            return messages, function_list, False
+        log.info(f"Degrading messages for {user} (total: {total_tokens_used}/max: {max_tokens})")
+        # First we will iterate through the messages and remove in the following sweep order:
+        # 1. Remove oldest tool call or response
+        # 2. Remove oldest assistant message
+        # 3. Remove oldest user message
+        # Then we will repeat the process until we are under the max token limit
+        # We will NOT remove the most recent user message or assistant message
+        # We will also not touch system messages
+        # We will also not touch function calls available to model (yet)
 
-        # Pop one random message from the first quarter of the conversation
-        index = round(len(messages) / 4)
-        popped = messages.pop(index)
-        total_tokens -= await self.count_tokens(json.dumps(popped), conf, model)
-        if total_tokens <= max_tokens:
-            return messages, function_list, True
+        most_recent_user, most_recent_assistant, most_recent_tool = _most_recent()
 
-        # Find the indices of the most recent messages for each role
-        most_recent_user = most_recent_function = most_recent_assistant = most_recent_tool = -1
-        for i, msg in enumerate(reversed(messages)):
-            if most_recent_user == -1 and msg["role"] == "user":
-                most_recent_user = len(messages) - 1 - i
-            if most_recent_function == -1 and msg["role"] == "function":
-                most_recent_function = len(messages) - 1 - i
-            if most_recent_tool == -1 and msg["role"] == "tool":
-                most_recent_tool = len(messages) - 1 - i
-            if most_recent_assistant == -1 and msg["role"] == "assistant":
-                most_recent_assistant = len(messages) - 1 - i
-            if most_recent_user != -1 and most_recent_function != -1 and most_recent_assistant != -1:
+        # Start degrading the conversation except for system messages and most recent messages
+        messages_to_purge = set()
+        token_reduction = 0
+        for idx, msg in enumerate(messages):
+            skip_conditions = [
+                msg["role"] == "system",
+                idx == most_recent_user,
+                idx == most_recent_assistant,
+                idx == most_recent_tool,
+            ]
+            if any(skip_conditions):
+                continue
+
+            # This message will get popped
+            token_reduction += 4  # Default count
+            if "name" in msg:
+                token_reduction += 1
+
+            if msg["role"] in ["tool", "function"]:
+                messages_to_purge.add(idx)
+                token_reduction += await self.count_tokens(msg["content"], model)
+            elif msg["role"] == "assistant":
+                messages_to_purge.add(idx)
+                content = msg["content"] or msg.get("tool_calls", "") or msg.get("function_call", "")
+                token_reduction += await self.count_tokens(str(content), model)
+            elif msg["role"] == "user":
+                messages_to_purge.add(idx)
+                token_reduction += await self.count_tokens(msg["content"], model)
+            else:
+                raise ValueError(f"Unknown role: {msg['role']}")
+
+            # Check if we are under the max token limit
+            if total_tokens_used - token_reduction <= max_tokens:
                 break
 
-        # Clear out function calls (not the result, just the message of it being called)
-        i = 0
-        while total_tokens > max_tokens and i < len(messages):
-            if messages[i]["content"] or messages[i].get("tool_calls"):
-                i += 1
+        # Remove messages
+        total_tokens_used -= token_reduction
+        for idx in sorted(messages_to_purge, reverse=True):
+            messages.pop(idx)
+
+        # Check if we are under the max token limit
+        if total_tokens_used <= max_tokens:
+            log.info(f"First sweep successful for {user} (total: {total_tokens_used}/max: {max_tokens})")
+            return True
+
+        # If still not under the max token limit, we will now remove function calls available to model
+        function_indexes_to_purge = set()
+        token_reduction = 0
+        for idx, func in enumerate(function_list):
+            token_reduction += await self.count_tokens(json.dumps(func), model)
+            function_indexes_to_purge.add(idx)
+            if total_tokens_used - token_reduction <= max_tokens:
+                break
+
+        # Remove function calls
+        total_tokens_used -= token_reduction
+        for idx in sorted(function_indexes_to_purge, reverse=True):
+            function_list.pop(idx)
+
+        # Check if we are under the max token limit
+        if total_tokens_used <= max_tokens:
+            log.info(f"Second sweep successful for {user} (total: {total_tokens_used}/max: {max_tokens})")
+            return True
+
+        # If still not under the max token limit, we will now DEGRADE the most recent user and assistant messages
+        # We will also remove the most recent function/tool message if it exists
+        messages_to_purge = set()
+        token_reduction = 0
+        # Just start degrading from the first onward
+        for idx, msg in enumerate(messages):
+            if msg["role"] == "system":
                 continue
-            messages.pop(i)
-            total_tokens -= 5  # Minus role and name
-
-        if total_tokens <= max_tokens:
-            return messages, function_list, True
-
-        log.debug(f"Degrading messages (total: {total_tokens}/max: {max_tokens})")
-        # Degrade the conversation except for the most recent user, assistant, and function/tool messages
-        i = 0
-        while total_tokens > max_tokens and i < len(messages):
-            if (
-                messages[i]["role"] == "system"
-                or i == most_recent_user
-                or i == most_recent_function
-                or i == most_recent_tool
-                or i == most_recent_assistant
-            ):
-                i += 1
-                continue
-
-            if not messages[i]["content"]:
-                if "function_call" not in messages[i]:
-                    messages.pop(i)
-                    total_tokens -= 5
-                else:
-                    i += 1
-                continue
-
-            if total_tokens <= max_tokens:
-                return messages, function_list, True
-
-            # Content is either a list or a string
-            if isinstance(messages[i]["content"], list):
-                for idx, msg in enumerate(messages[i]["content"]):
-                    if msg["type"] != "text":
-                        continue
-                    degraded_content = _degrade_message(msg["text"])
-                    pre = await self.count_tokens(msg["text"], conf, model)
-                    post = await self.count_tokens(degraded_content, conf, model)
-                    diff = pre - post
-                    messages[i]["content"][idx]["text"] = degraded_content
-                    total_tokens -= diff
+            # This message will get popped
+            token_reduction += 4
+            if msg["role"] in ["tool", "function"]:
+                messages_to_purge.add(idx)
+                token_reduction += await self.count_tokens(msg["content"], model)
+            elif msg["role"] == "assistant":
+                messages_to_purge.add(idx)
+                content = msg["content"] or msg.get("tool_calls", "") or msg.get("function_call", "")
+                token_reduction += await self.count_tokens(str(content), model)
+            elif msg["role"] == "user":
+                messages_to_purge.add(idx)
+                token_reduction += await self.count_tokens(msg["content"], model)
             else:
-                degraded_content = _degrade_message(messages[i]["content"])
-                pre = await self.count_tokens(messages[i]["content"], conf, model)
-                if degraded_content:
-                    post = await self.count_tokens(degraded_content, conf, model)
-                    diff = pre - post
-                    messages[i]["content"] = degraded_content
-                    total_tokens -= diff
-                else:
-                    total_tokens -= pre
-                    total_tokens -= 4
-                    messages.pop(i)
+                raise ValueError(f"Unknown role: {msg['role']}")
 
-            if total_tokens <= max_tokens:
-                return messages, function_list, True
+            # Check if we are under the max token limit
+            if total_tokens_used - token_reduction <= max_tokens:
+                break
 
-        # Wipe all tool call messages:
-        i = 0
-        while total_tokens > max_tokens and i < len(messages):
-            if "tool_calls" not in messages[i] and messages[i]["role"] != "tool":
-                i += 1
-                continue
-            messages.pop(i)
+        # Remove messages
+        total_tokens_used -= token_reduction
+        for idx in sorted(messages_to_purge, reverse=True):
+            messages.pop(idx)
 
-        log.debug(f"Removing functions (total: {total_tokens}/max: {max_tokens})")
-        # Degrade function_list before last resort
-        while total_tokens > max_tokens and len(function_list) > 0:
-            popped = function_list.pop(0)
-            total_tokens -= await self.count_tokens(json.dumps(popped), conf, model)
-            if total_tokens <= max_tokens:
-                return messages, function_list, True
+        # Check if we destroyed the whole convo
+        messages_without_system = sum(1 for msg in messages if msg["role"] != "system")
+        if messages_without_system == 0:
+            # We failed or the admins are trying their damn best to configure stupid settings
+            raise ValueError(f"Failed to degrade conversation for {user}, guild owner needs to check settings")
 
-        # Degrade the most recent user and function messages as the last resort
-        log.debug(f"Degrading user/function messages (total: {total_tokens}/max: {max_tokens})")
-        for i in [most_recent_function, most_recent_user, most_recent_tool]:
-            if total_tokens <= max_tokens:
-                return messages, function_list, True
-            while total_tokens > max_tokens:
-                if isinstance(messages[i]["content"], list):
-                    for idx, msg in enumerate(messages[i]["content"]):
-                        if msg["type"] != "text":
-                            continue
-                        degraded_content = _degrade_message(msg["text"])
-                        pre = await self.count_tokens(msg["text"], conf, model)
-                        post = await self.count_tokens(degraded_content, conf, model)
-                        diff = pre - post
-                        messages[i]["content"][idx]["text"] = degraded_content
-                        total_tokens -= diff
-                else:
-                    degraded_content = _degrade_message(messages[i]["content"])
-                    pre = await self.count_tokens(messages[i]["content"], conf, model)
-                    if degraded_content:
-                        post = await self.count_tokens(degraded_content, conf, model)
-                        diff = pre - post
-                        messages[i]["content"] = degraded_content
-                        total_tokens -= diff
-                    else:
-                        total_tokens -= pre
-                        total_tokens -= 4
-                        messages.pop(i)
-        return messages, function_list, True
+        log.info(f"Third sweep successful for {user} (total: {total_tokens_used}/max: {max_tokens})")
+        return True
 
     async def token_pagify(self, text: str, conf: GuildSettings) -> List[str]:
         """Pagify a long string by tokens rather than characters"""
@@ -620,7 +467,7 @@ class API(MixinMeta):
             log.debug("No text to pagify!")
             return []
         token_chunks = []
-        tokens = await self.get_tokens(text, conf)
+        tokens = await self.get_tokens(text)
         current_chunk = []
 
         max_tokens = min(conf.max_tokens - 100, MODELS[conf.model])
@@ -689,7 +536,7 @@ class API(MixinMeta):
                         inline=False,
                     )
                 schema = json.dumps(func["jsonschema"], indent=2)
-                tokens = await self.count_tokens(schema, conf, model)
+                tokens = await self.count_tokens(schema, model)
 
                 schema_text = _("This function consumes `{}` input tokens each call\n").format(humanize_number(tokens))
 
@@ -738,7 +585,7 @@ class API(MixinMeta):
             num = 0
             for i in range(start, stop):
                 name, embedding = embeddings[i]
-                tokens = await self.count_tokens(embedding.text, conf, model)
+                tokens = await self.count_tokens(embedding.text, model)
                 text = (
                     box(f"{embedding.text[:30].strip()}...")
                     if len(embedding.text) > 33
@@ -750,12 +597,14 @@ class API(MixinMeta):
                     "`Tokens:     `{}\n"
                     "`Dimensions: `{}\n"
                     "`AI Created: `{}\n"
+                    "`Model:      `{}\n"
                 ).format(
                     embedding.created_at(),
                     embedding.modified_at(relative=True),
                     tokens,
                     len(embedding.embedding),
                     embedding.ai_created,
+                    conf.embed_model,
                 )
                 val += text
                 fieldname = f"➣ {name}" if place == num else name

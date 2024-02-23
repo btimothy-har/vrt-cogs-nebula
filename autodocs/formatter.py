@@ -54,6 +54,7 @@ class CustomCmdFmt:
         extended_info: bool,
         privilege_level: str,
         embedding_style: bool = False,
+        min_privilage_level: str = "user",
     ):
         self.bot = bot
         self.cmd = cmd
@@ -62,6 +63,7 @@ class CustomCmdFmt:
         self.extended_info = extended_info
         self.privilege_level = privilege_level
         self.embedding_style = embedding_style
+        self.min_privilage_level = min_privilage_level
 
         self.is_slash: bool = isinstance(cmd, SlashCommand)
         self.is_hybrid: bool = any(
@@ -125,7 +127,7 @@ class CustomCmdFmt:
 
         # Get command usage info
         if self.is_slash:
-            usage = f"/{self.name} "
+            usage = f"/{self.name}"
             arginfo = ""
             for i in self.options:
                 name = i["name"]
@@ -134,11 +136,11 @@ class CustomCmdFmt:
 
                 if required:
                     REQUIRED = _("Required")
-                    usage += f"<{name}> "
+                    usage += f" <{name}>"
                     arginfo += f" - `{name}:` ({REQUIRED}) {desc}\n"
                 else:
                     OPTIONAL = _("Optional")
-                    usage += f"[{name}] "
+                    usage += f" [{name}]"
                     arginfo += f" - `{name}:` ({OPTIONAL}) {desc}\n"
 
             doc += f" - {USAGE}: `{usage}`\n"
@@ -154,17 +156,17 @@ class CustomCmdFmt:
             if self.checks:
                 doc += f" - {CHECKS}: `{humanize_list(checks)}\n"
         else:
-            usage = f"[p]{self.name} "
+            usage = f"[p]{self.name}"
             try:
                 for k, v in self.cmd.clean_params.items():
                     arg = v.name
 
                     if v.required:
-                        usage += f"<{arg}> "
+                        usage += f" <{arg}>"
                     elif v.kind == v.KEYWORD_ONLY:
-                        usage += f"[{arg}] "
+                        usage += f" [{arg}]"
                     else:
-                        usage += f"[{arg}={v.default}] "
+                        usage += f" [{arg}={v.default}]"
             except AttributeError:
                 pass
 
@@ -174,10 +176,13 @@ class CustomCmdFmt:
                 doc += f" - {SLASH} {USAGE}: `{usage}`\n"
 
             limit = PRIVILEGES[self.privilege_level]
+            minimum = PRIVILEGES[self.min_privilage_level]
             if perms := self.perms:
                 priv = perms.privilege_level
                 if priv:
                     if priv.value > limit:
+                        return None
+                    if priv.value < minimum:
                         return None
                     if priv.value > 1:
                         RESTRICTED = _("Restricted to")
